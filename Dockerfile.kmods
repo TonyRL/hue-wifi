@@ -1,0 +1,25 @@
+# Builds ath9k Wi-Fi kernel modules for the Philips Hue Bridge 2.x kernel (4.14.241, OpenWrt 19.07.8, ar71xx). Signify's kernel differs from stock as seen on the device: GCC 8.3.0, KALLSYMS on (struct module is 352 bytes, not 320), PCI off, HARDENED_USERCOPY off (no pci_* or __check_object_size exports in /proc/kallsyms) and NETFILTER_INGRESS off (struct net_device pcpu_refcnt at 712, not 716, read from the kernel binary). KALLSYMS changes the module ABI, so the official kmod packages crash the loader. A full buildroot is required.
+FROM ubuntu:20.04 AS build
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential ca-certificates curl file gawk gettext git libelf-dev libncurses5-dev libssl-dev \
+    python2 python3 python3-distutils rsync unzip wget xz-utils zlib1g-dev \
+    && rm -rf /var/lib/apt/lists/*
+RUN useradd -m build
+USER build
+WORKDIR /home/build
+RUN git clone --depth 1 -b v19.07.8 https://git.openwrt.org/openwrt/openwrt.git sdk
+WORKDIR /home/build/sdk
+RUN printf 'CONFIG_TARGET_ar71xx=y\nCONFIG_TARGET_ar71xx_generic=y\nCONFIG_DEVEL=y\nCONFIG_TOOLCHAINOPTS=y\nCONFIG_GCC_USE_VERSION_8=y\n' > .config \
+    && make defconfig && make -j"$(nproc)" tools/install toolchain/install
+RUN printf '# CONFIG_PCI is not set\n# CONFIG_HARDENED_USERCOPY is not set\n# CONFIG_NETFILTER_INGRESS is not set\n' >> target/linux/ar71xx/generic/config-default \
+    && printf 'CONFIG_KERNEL_KALLSYMS=y\n# CONFIG_PACKAGE_firewall is not set\n# CONFIG_PACKAGE_kmod-ipt-offload is not set\n# CONFIG_PACKAGE_kmod-nf-flow is not set\nCONFIG_PACKAGE_kmod-ath9k=y\nCONFIG_PACKAGE_iw=y\nCONFIG_PACKAGE_wireless-regdb=y\n' >> .config \
+    && make defconfig && grep -E '^CONFIG_(KERNEL_KALLSYMS|GCC_USE_VERSION_8|PACKAGE_kmod-ath9k)=' .config \
+    && make -j"$(nproc)" target/linux/compile \
+    && grep -E '^(CONFIG_KALLSYMS|CONFIG_PCI|CONFIG_HARDENED_USERCOPY|CONFIG_NETFILTER_INGRESS)=|^# CONFIG_(PCI|HARDENED_USERCOPY|NETFILTER_INGRESS) ' build_dir/target-*/linux-ar71xx_generic/linux-4.14.241/.config \
+    && make -j"$(nproc)" package/kernel/mac80211/compile package/network/utils/iw/compile package/firmware/wireless-regdb/compile
+
+FROM scratch
+ARG T=/home/build/sdk/bin/targets/ar71xx/generic/packages
+COPY --from=build $T/kmod-cfg80211_*.ipk $T/kmod-mac80211_*.ipk $T/kmod-ath_*.ipk $T/kmod-ath9k-common_*.ipk $T/kmod-ath9k_*.ipk \
+    /home/build/sdk/bin/packages/mips_24kc/base/iw_*.ipk /home/build/sdk/bin/packages/mips_24kc/base/wireless-regdb_*.ipk /
